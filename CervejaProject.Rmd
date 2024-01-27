@@ -1,0 +1,414 @@
+---
+title: "Regresja i analiza wariancji - Projekt"
+author:
+  name: Kamil Jarkowski
+  affiliation: Politechnika Krakowska
+subtitle: Regresja prosta, wieloczynnikowa - projekt na temat spożycia piwa w Sao Paulo
+output:   
+  html_document:
+    theme: readable
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+W naszym projekcie będziemy się zajmować wyprowadzeniem modelu regresji prostej, wielorakiej (oraz dodatkowo robust) spożycia piwa w zależności od temperatury.
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(cache = TRUE, warning = TRUE, message = FALSE)
+library(tidyverse)
+library(ggplot2)
+library(rstatix)
+library(modelr)
+library(nortest)
+library(lmtest)
+library(car)
+```
+
+Opiszmy teraz dane w tymże datasecie.
+
+Temperatura Media (C) - średnia temperatura w stopniach Celsjusza
+
+Temperatura Minima (C) - minimalna temaperatura w stopniach Celsjusza
+
+Temperatura Maxima (C) - maksymalna temperatura w stopniach Celsjusza
+
+Precipiracao (mm) - ilość opadów danego dnia w milimetrach
+
+Final de Semana - koniec tygodnia, innymi słowy, czy jest weekend czy dzień powszedni:
+0 - dzień powszedni
+1 - weekend
+
+Consumo de cerveja (litros) - spożycie piwa danego dnia w litrach
+
+Niestety dataset, który znaleźliśmy na stronie kaggle nie jest "czysty", zatem skupimy się teraz na porządnym wczytaniu i wyczyszczeniu zbiory danych.
+
+```{r}
+piwo <- readr::read_csv("Consumo_cerveja1.csv", col_types = cols(.default = col_character()))
+
+# Przekształcenie kolumn numerycznych, zamieniając przecinki na kropki
+numeryczne_kolumny <- c("Temperatura Media (C)", "Temperatura Minima (C)", 
+                         "Temperatura Maxima (C)", "Precipitacao (mm)", "Consumo de cerveja (litros)")
+
+for (kolumna in numeryczne_kolumny) {
+  piwo[[kolumna]] <- as.numeric(gsub(",", ".", piwo[[kolumna]]))
+}
+piwo <- na.omit(piwo)
+piwo
+```
+
+Teraz ponieważ chcielibyśmy, aby łatwiej pracowało się na tym datasecie (jest to dataset po portugalsku z Brazylisjskiego miasta Sao Paulo), zmienimy etykiety kolumn. Do tego zmienimy typ danych w kolumnie czy_weekend z <chr> na <dbl>.
+
+```{r}
+piwo <- piwo %>% rename(data = Data, temp_sr = `Temperatura Media (C)`, temp_min = `Temperatura Minima (C)`, temp_max = `Temperatura Maxima (C)`, opady = `Precipitacao (mm)`, czy_weekend = `Final de Semana`, spozycie_piwa = `Consumo de cerveja (litros)` )
+piwo$czy_weekend <- as.numeric(piwo$czy_weekend)
+piwo
+```
+
+Dzielimy nasz zbiór danych na zbiór treningowy oraz testowy w celu budowania modelu oraz testowania go.
+
+```{r}
+set.seed(80085)
+partition <- caret::createDataPartition(piwo$spozycie_piwa, list = FALSE, p = 0.75)
+piwo_train <- piwo[partition, ]
+piwo_test <- piwo[-partition, ]
+piwo_train
+piwo_test
+```
+
+Sprawdzamy numerycznie oraz wizualnie korelacje zmiennych ze zmienną spożycie piwa.
+
+```{r}
+korelacje <- cor(piwo_train %>% select_if(is.numeric))
+korelacjepiwo <- korelacje['spozycie_piwa',]
+korelacjepiwo
+```
+```{r}
+library(ggcorrplot)
+ggcorrplot(korelacje, type='lower')
+```
+
+Budujemy model regresji liniowej wielorakiej, gdzie zmienną objaśnianą jest spożycie piwa, a objaśniającymi są temperatura maksymalna oraz czy weekend. Działamy na zbiorze danych treningowych.
+
+```{r}
+model_piwny <- lm(spozycie_piwa ~ temp_max + czy_weekend, data = piwo_train)
+summary(model_piwny)
+```
+
+Teraz sprawdzamy założenia regresji liniowej. 
+
+```{r}
+# 1. Sprawdzenie normalności reszt
+lillie.test(model_piwny$residuals)
+qqPlot(model_piwny, main="Wykres Q-Q dla reszt modelu regresji")
+
+# 2. Średnia reszt równa zero
+plot(model_piwny$fitted.values, model_piwny$residuals)
+abline(h = 0, col = "red")
+t.test(model_piwny$residuals)
+
+# 3. Sprawdzenie autokorelacji
+dwtest(model_piwny)
+
+# 4.1. Test Breuscha-Pagana
+bptest(model_piwny)
+
+# 4.2. Test White’a
+bptest(model_piwny, ~ fitted.values(model_piwny) + I(fitted.values(model_piwny)^2))
+
+# 4.3. Test Koenkera-Basseta
+bptest(model_piwny, ~ fitted(model_piwny) + I(fitted(model_piwny)^2))
+
+# 5. Sprawdzenie współliniowości
+vif(model_piwny)
+
+plot(model_piwny, which = 3)
+```
+
+Niestety w naszym modelu nie mamy spełnionego założenia homoskedastyczności reszt. Teraz zatem zbadamy obserwacje wpływowe i usuniemy je za pomocą metody Cook'a.
+
+```{r}
+cooksD <- cooks.distance(model_piwny)
+plot(cooksD, ylab ='Odleglosc Cooka', type = 'h')
+```
+
+```{r}
+piwo_train_czyste <- piwo_train %>% mutate(cook_D = unlist(cooks.distance(model_piwny))) %>% dplyr::filter(cook_D <= mean(cook_D))
+nrow(piwo_train_czyste)
+```
+
+```{r}
+odciecie <- 4 / (nrow(piwo_train) - length(model_piwny$coefficients) - 2)
+wplywowe <- which (cooksD > odciecie)
+piwo_train_czyste <- piwo_train[-wplywowe, ]
+nrow(piwo_train_czyste)
+```
+
+Budujemy teraz jeszcze raz model, teraz na zbiorze danych treningowych z usuniętymi wartościami wpływowymi.
+
+```{r}
+model_piwny_wplywowe <- lm(spozycie_piwa ~ temp_max + czy_weekend, data = piwo_train_czyste)
+summary(model_piwny_cookd)
+```
+```{r}
+ggplot(model_piwny_wplywowe, aes(.fitted, sqrt(abs(.stdresid)))) + geom_point() + stat_smooth(method= NULL, se=FALSE) +
+  labs(title='Zależność pierwiastka standaryzowanych reszt od dopasowanych wartości', x='Dopasowane wartości', y='Pierwiastek standaryzowanych reszt')
+```
+
+Badamy raz jeszcze założenia na nowym modelu.
+
+```{r}
+# 1. Sprawdzenie normalności reszt
+lillie.test(model_piwny_wplywowe$residuals)
+qqPlot(model_piwny_wplywowe, main="Wykres Q-Q dla reszt modelu regresji")
+
+# 2. Średnia reszt równa zero
+plot(model_piwny_wplywowe$fitted.values, model_piwny_wplywowe$residuals)
+abline(h = 0, col = "red")
+t.test(model_piwny_wplywowe$residuals)
+
+# 3. Sprawdzenie autokorelacji - durbin watson
+dwtest(model_piwny_wplywowe)
+
+# 4.1. Test Breuscha-Pagana
+bptest(model_piwny_wplywowe)
+
+# 4.2. Test White’a
+bptest(model_piwny_wplywowe, ~ fitted.values(model_piwny_wplywowe) + I(fitted.values(model_piwny_wplywowe)^2))
+
+# 4.3. Test Koenkera-Basseta
+bptest(model_piwny_wplywowe, ~ fitted(model_piwny_wplywowe) + I(fitted(model_piwny_wplywowe)^2))
+
+# 5. Sprawdzenie współliniowości
+vif(model_piwny_wplywowe)
+plot(model_piwny_wplywowe, which = 3)
+```
+
+Tutaj także musimy odrzucić ten model, nie mamy spełnionych założeń normalności reszt oraz homoskedastyczności.
+
+Teraz zbudujemy model Robust Linear Model, który jest mniej czuły na wartości wpływowe.
+
+```{r}
+library(MASS)
+library(sfsmisc)
+model_piwny_rlm <- rlm(spozycie_piwa ~ temp_max + czy_weekend, data = piwo_train, psi = psi.bisquare)
+summary(model_piwny_rlm)
+```
+
+Tutaj pokazujemy jak działa model RLM, tzn. dla danej wartości resty przypisuje jej wagę z zakresu (0, 1).
+
+```{r}
+hweights <- data.frame(spozycie_piwa = piwo_train$spozycie_piwa, resid = model_piwny_rlm$resid, weight = model_piwny_rlm$w)
+hweights2 <- hweights[order(model_piwny_rlm$w), ]
+hweights2
+```
+
+Sprawdzamy założenia modelu RLM, są one bardzo podobne jak w modelach typu OLS, z tym że, nie zakłada on normalności reszt (często zakłada on, że reszty przyjmują mieszane rozkłady normalne).
+
+```{r}
+# Obliczenie reszt standaryzowanych z modelu RLM
+residuals_standardized <- residuals(model_piwny_rlm, type = "pearson")
+
+# Tworzenie ramki danych dla wykresu
+plot_data <- data.frame(
+  Fitted = fitted(model_piwny_rlm),
+  SqrtAbsStdResiduals = sqrt(abs(residuals_standardized))
+)
+
+# Wykres Scale-Location
+ggplot(plot_data, aes(x = Fitted, y = SqrtAbsStdResiduals)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red") +
+  labs(title = "Wykres Scale-Location",
+       x = "Wartości dopasowane",
+       y = "Pierwiastek z wartości bezwzględnych reszt standaryzowanych") +
+  theme_minimal()
+```
+
+Ładujemy funkcję sprawdzającą nasz model, sprawdzając go na danych testowych.
+
+```{r, echo=FALSE}
+MAE <- function(y_actual, y_predicted){
+  return(mean(abs(y_actual - y_predicted)))
+}
+MAPE <- function(y_actual, y_predicted){
+  return(mean(abs(((y_actual)-y_predicted)/y_actual))*100)
+}
+RMSE <- function(y_actual, y_predicted){
+  return(sqrt(mean((y_actual-y_predicted)^2)))
+}
+```
+
+
+```{r, echo=FALSE}
+library(broom)
+
+model_summary <- function(model, test_data, test_y){
+  model_glance <- broom::glance(model)
+  model_augment <- broom::augment(model)
+  train_mae <- mean(abs(model_augment$.resid))
+  train_mape <- mean(abs(model_augment$.resid/dplyr::pull(model_augment, var=1)))*100
+  predicted_y <- predict(model, test_data)
+  test_rmse <- sqrt(mean((test_y - predicted_y)^2))
+  test_mae <- mean(abs(test_y - predicted_y))
+  test_mape <- mean(abs((test_y - predicted_y)/test_y))*100
+  print("Wartości charakterystyk liczbowych modelu.")
+  print("------------------------------------------")
+  cat("Treningowe R^2 wyniosło: ", model_glance$r.squared, "\n",
+  "Treningowe \"poprawione\" R^2 wyniosło: ", model_glance$adj.r.squared, "\n",
+  "Kryterium informacyjne Akaikego (AIC) wyniosło: ", model_glance$AIC, "\n",
+  "---------------------------------------------", "\n",
+  "Charakterystyki \"out-of-sample\"", "\n",
+  "Charakterystyka |   train  |   test   | \n", 
+  "RMSE wyniosło:  |", model_glance$sigma, "|", test_rmse , "|", "\n",
+  "MAE wyniosło:   |", train_mae, "|",  test_mae, "|" , "\n",
+  "MAPE wyniosło:  |", round(train_mape,2), "%|", round(test_mape,2), "%|",  "\n")
+}
+```
+
+Teraz wywołujemy funkcję i porównujemy wartości.
+
+```{r}
+model_summary(model_piwny_rlm, piwo_test, piwo_test$spozycie_piwa)
+```
+
+# Pseudo R^2 - w modelu typu RLM nie można użyć statystyki R^2 z powodu, że model RLM korzysta z innej funkcji straty od standardowych modeli regresji liniowej.
+
+W modelach typu RLM można obliczyć pseudo R^2, którym można się zasugerować, gdy chcemy zbadać procent wyjaśniania modelu przez zmienne.
+
+```{r}
+# Obliczenie logarytmu wiarygodności dla modelu dopasowanego
+log_likelihood <- sum(dnorm(model_piwny_rlm$residuals, mean = mean(model_piwny_rlm$residuals), 
+                            sd = sd(model_piwny_rlm$residuals), log = TRUE))
+
+# Obliczenie logarytmu wiarygodności dla modelu zerowego
+model_zero <- rlm(spozycie_piwa ~ 1, data = piwo_train)
+log_likelihood_zero <- sum(dnorm(model_zero$residuals, mean = mean(model_zero$residuals), 
+                                 sd = sd(model_zero$residuals), log = TRUE))
+
+# Obliczenie pseudo R-kwadratu McFaddena
+pseudo_r_squared <- 1 - (log_likelihood / log_likelihood_zero)
+
+print(pseudo_r_squared)
+```
+
+
+```{r}
+plot(fitted(model_piwny_rlm), residuals(model_piwny_rlm),
+     main = "Wykres reszt vs. wartości dopasowane",
+     xlab = "Wartości dopasowane",
+     ylab = "Reszty")
+abline(h = 0, col = "red")
+
+# Sprawdzenie niezależności reszt
+# Test Durbin-Watsona
+dwtest(model_piwny_rlm, alternative = "two.sided")
+
+# Sprawdzenie nieobecności autokorelacji
+# Test Breusch-Godfrey
+bgtest(model_piwny_rlm)
+
+# VIF dla oceny koliniarności
+vif(model_piwny_rlm)
+
+# Ponieważ RLM nie zakłada normalności reszt, nie wykonujemy testu Shapiro-Wilka na normalność.
+# Zamiast tego możemy zobaczyć rozkład reszt graficznie
+qqnorm(residuals(model_piwny_rlm))
+qqline(residuals(model_piwny_rlm))
+
+# Sprawdzenie homoskedastyczności za pomocą testu Breuscha-Pagana
+plot(model_piwny_rlm, which = 3)
+bptest(model_piwny_rlm)
+```
+
+No i co teraz? Trzeba chyba zrobić prosty model regresji prostej z jedną zmienną objaśniającą...
+
+```{r}
+model_piwny_lm <- lm(spozycie_piwa ~ temp_max, data = piwo_train)
+summary(model_piwny_lm)
+```
+
+
+```{r}
+model_summary(model_piwny_lm, piwo_test, piwo_test$spozycie_piwa)
+```
+```{r}
+# Sprawdzenie normalności reszt
+lillie.test(model_piwny_lm$residuals)
+shapiro.test(model_piwny_lm$residuals)
+qqPlot(model_piwny_lm, main="Wykres Q-Q dla reszt modelu regresji")
+
+# Sprawdzenie liniowości (średnia reszt równa zero)
+plot(model_piwny_lm$fitted.values, model_piwny_lm$residuals)
+abline(h = 0, col = "red")
+
+# Sprawdzenie niezależności reszt
+lmtest::dwtest(model_piwny_lm)
+
+# Sprawdzenie homoskedastyczności
+bptest(model_piwny_lm)
+plot(model_piwny_lm, which = 3)
+```
+```{r}
+ggplot(model_piwny_lm, aes(.hat, .stdresid)) + geom_point(aes(size=.cooksd)) + stat_smooth(method='loess', formula=y~x, se=FALSE) + labs(title='Leverage vs Standardized Residuals', x='Leverage', y='Standardized Residuals', size='Cooks distance')
+```
+```{r}
+model_piwny_lm_Cook <- piwo_train %>% mutate(cook_D = unlist(cooks.distance(model_piwny_lm))) %>% dplyr::filter(cook_D <= mean(cook_D))
+nrow(model_piwny_lm_Cook)
+```
+```{r}
+# Obliczanie odległości Cooka dla modelu
+cook_d <- cooks.distance(model_piwny_lm)
+
+# Ustalanie progu dla wartości odstających
+# Zazwyczaj używa się 4/n lub podobnego kryterium
+cook_d_threshold <- 4 / length(cook_d)
+
+# Filtrowanie danych, usuwając obserwacje z dużą odległością Cooka
+piwo_train_cook_filtered <- piwo_train %>% 
+  filter(cook_d <= cook_d_threshold)
+
+# Sprawdzenie, ile obserwacji pozostało
+nrow(piwo_train)
+nrow(piwo_train_cook_filtered)
+```
+
+
+```{r}
+model_piwny_lmCookD <- lm(spozycie_piwa ~ temp_max, data = piwo_train_cook_filtered)
+summary(model_piwny_lmCookD)
+```
+```{r}
+# Sprawdzenie normalności reszt
+lillie.test(model_piwny_lmCookD$residuals)
+shapiro.test(model_piwny_lmCookD$residuals)
+qqPlot(model_piwny_lmCookD, main="Wykres Q-Q dla reszt modelu regresji")
+
+# Sprawdzenie liniowości (średnia reszt równa zero)
+plot(model_piwny_lmCookD$fitted.values, model_piwny_lmCookD$residuals)
+abline(h = 0, col = "red")
+
+# Sprawdzenie niezależności reszt
+lmtest::dwtest(model_piwny_lmCookD)
+
+# Sprawdzenie homoskedastyczności
+bptest(model_piwny_lmCookD)
+```
+```{r}
+model_summary(model_piwny_lmCookD, piwo_test, piwo_test$spozycie_piwa)
+```
+```{r}
+piwo_train_cook_filtered$predicted_spozycie <- predict(model_piwny_lmCookD, newdata = piwo_train_cook_filtered)
+
+# Tworzenie wykresu z faktycznymi wartościami spożycia piwa i linii trendu
+ggplot(data = piwo_train_cook_filtered, aes(x = temp_max)) +
+  geom_point(aes(y = spozycie_piwa), color = 'blue', alpha = 0.5) +  # Faktyczne wartości jako punkty
+  geom_line(aes(y = predicted_spozycie), color = 'red') +  # Linia trendu z przewidywaniami
+  labs(title = 'Faktyczne vs. Przewidywane Spożycie Piwa w zależności od Temperatury Maks',
+       x = 'Temperatura Maksymalna',
+       y = 'Spożycie Piwa') +
+  theme_minimal()
+```
+
+
+
