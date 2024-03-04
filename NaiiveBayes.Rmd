@@ -1,0 +1,171 @@
+---
+title: "Tidymodels oraz naiwny Bayes"
+author:
+  name: Kamil Jarkowski
+  affiliation: Politechnika Krakowska
+output:
+  html_document:
+    df_print: paged
+---
+
+Teoria:
+
+Metoda Naiwnego Bayesa to metoda nadzorowanego uczenia maszynowego, który bazuje na Twierdzeniu Bayesa tzn. \$ P(A\|B) = \frac{P(B|A)P(A)}{P(B)}\$, gdzie $P(A|B)$ to prawdopodobieństwo warunkowe, że zachodzi zdarzenie A pod warunkiem B, $P(B|A)$ to prawdopodobieństwo warunkowe, że zachodzi zdarzenie B pod warunkiem A, $P(A)$ oraz $P(B)$ to prawdopodobieństwa wystąpienia zdarzenia A i B.
+
+Model Naiwnego Bayesa nazywamy naiwnym, ponieważ zakładamy, że każdy predyktor modelu ML jest niezależny od siebie.
+
+Twierdzenie Bayesa dla algorytmu naiwnego Bayesa: $P(C_i|x_1, x_2, ..., x_n) = \frac{P(x_1,x_2, ..., x_n | C_i) \cdot P(C_i)}{P(x_1,x_2, ..., x_n)}$, gdzie $C_1, C_2, ..., C_n$ to klasy, a predyktory $x_1, x_2, ..., x_n$ są wektorami. Celem naiwnego Bayesa jest obliczenie prawdopodobieństwa warunkowego zdarzenia z wektorem cech $x_1, x_2, ..., x_n$ należącego do danej klasy $C_i$.
+
+Prosty przykład: Mamy trzy zwierzęta: Kot, Papuga i Żółw oraz predyktory pływanie, skrzydła, zielony oraz ostre zęby:
+
+```{r}
+przyklad <- data.frame(
+  zwierze = c("kot", "papuga", "zolw"),
+  plywanie = c("450/500", "50/500", "500/500"),
+  skrzydla = c("0", "500/500", "0"),
+  zielony = c("0", "400/500", "100/500"),
+  ostre_zeby = c("500/500", "0", "50/500")
+)
+przyklad
+```
+
+Weźmy teraz jakąś obserwację, przykładowo mamy zwierzątko, które chcemy zaklasyfikować po zaobserwowanych właściwościach czyli:
+
+```{r}
+obserwacja <- data.frame(
+  obserwacja = 1,
+  plywanie = TRUE,
+  skrzydla = FALSE,
+  zielony = TRUE,
+  ostre_zeby = FALSE
+)
+obserwacja
+```
+
+I chcielibyśmy sprawdzić co to za zwierzątko. Aby to sprawdzić skorzystamy z metody naiwnego Bayesa.
+
+Aby sprawdzić, czy to zwierzę jest kotem: $$P(kot| plywanie, zielony) = \frac{P(plywanie | kot) \cdot P(zielony|kot) \cdot P(kot)}{P(plywanie, zielony)} = \frac{0.9 \cdot 0 \cdot 0.33}{P(plywanie, zielony)} = \frac{0}{P(plywanie, zielony)} $$
+
+Aby sprawdzić, czy to zwierzę jest papugą: $$P(papuga| plywanie, zielony) = \frac{P(plywanie | papuga) \cdot P(zielony|papuga) \cdot P(papuga)}{P(plywanie, zielony)} = \frac{0.1 \cdot 0.8 \cdot 0.33}{P(plywanie, zielony)} = \frac{0.0264}{P(plywanie, zielony)} $$
+
+Aby sprawdzić, czy to zwierzę jest żółwiem: $$P(zolw| plywanie, zielony) = \frac{P(plywanie | zolw) \cdot P(zielony|zolw) \cdot P(zolw)}{P(plywanie, zielony)} = \frac{1 \cdot 0.2 \cdot 0.33}{P(plywanie, zielony)} = \frac{0.0666}{P(plywanie, zielony)} $$
+
+Dla każdego z powyższych obliczeń, mamy taki sam mianownik tzn. $P(plywanie, zielony)$, zatem nie bierzemy go pod uwagę. Skupimy się na liczniku. Porównując liczniki możemy zauważyć, że największy jest dla żółwia, zatem to zwierzątko ma klasę przewidzianą jako żółw.
+
+W tym projekcie na szybko zaprezentuję jak wygląda użycie modelu machine learningowego, a konkretnie naiwnego Bayesa.
+
+Zaimportujmy paczki potrzebne do wykonania tego zadania:
+
+```{r setup}
+library(tidymodels)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(mice)
+library(Amelia)
+library(discrim)
+```
+
+```{r}
+cukrzyca <- read.csv("diabetes.csv")
+cukrzyca
+```
+
+```{r}
+cukrzyca$Outcome <- factor(cukrzyca$Outcome, levels = c(0,1), labels = c("False", "True"))
+cukrzyca
+```
+
+```{r}
+cukrzyca[, 2:7][cukrzyca[, 2:7] == 0] <- NA
+cukrzyca %>% summarise(across(.cols = everything(), ~sum(is.na(.))))
+```
+
+```{r}
+cukrzyca %>% filter(is.na(Glucose))
+```
+
+```{r}
+missmap(cukrzyca)
+mice_mod <- mice(cukrzyca[, c("Glucose","BloodPressure","SkinThickness","Insulin","BMI")], method='rf')
+mice_complete <- complete(mice_mod)
+cukrzyca$Glucose <- mice_complete$Glucose
+cukrzyca$BloodPressure <- mice_complete$BloodPressure
+cukrzyca$SkinThickness <- mice_complete$SkinThickness
+cukrzyca$Insulin<- mice_complete$Insulin
+cukrzyca$BMI <- mice_complete$BMI
+missmap(cukrzyca)
+```
+
+## Dzielenie danych
+
+```{r}
+set.seed(80085)
+cukrzyca_dzielenie <- initial_split(cukrzyca, strata = "Outcome")
+train <- training(cukrzyca_dzielenie)
+test <- testing(cukrzyca_dzielenie)
+```
+
+## Specyfikacja modelu
+
+```{r}
+library(klaR)
+
+nb_model <- naive_Bayes() %>%
+  set_mode("classification") %>%
+  set_engine("klaR")
+```
+
+## Przepis
+
+```{r}
+cukrzyca_prz <- recipe(
+  Outcome ~ .,
+  data = train
+)
+summary(cukrzyca_prz)
+```
+
+## Przepływ pracy
+
+```{r}
+cukrzyca_wf <- workflow() %>%
+  add_recipe(cukrzyca_prz) %>% 
+  add_model(nb_model)
+
+cukrzyca_wf
+```
+
+## Dopasowanie modelu do danych treningowych
+
+```{r}
+fitted_wf <- fit(cukrzyca_wf, data = train)
+
+test_predictions <- predict(fitted_wf, new_data = test)
+
+head(test_predictions)
+
+conf_matrix <- caret::confusionMatrix(test_predictions$.pred_class, test$Outcome)
+
+print(conf_matrix)
+```
+
+```{r}
+przykladowe_dane <- data.frame(
+  Pregnancies = c(6, 1, 8, 1, 0),
+  Glucose = c(148, 85, 183, 89, 137),
+  BloodPressure = c(72, 66, 64, 66, 40),
+  SkinThickness = c(35, 29, 32, 23, 35),
+  Insulin = c(0, 0, 110, 94, 168),
+  BMI = c(33.6, 26.6, 23.3, 28.1, 43.1),
+  DiabetesPedigreeFunction = c(0.627, 0.351, 0.672, 0.167, 2.288),
+  Age = c(50, 31, 32, 21, 33)
+)
+
+predictions <- predict(fitted_wf, new_data = przykladowe_dane)
+
+# Dodanie przewidywanej klasy do przykładowych danych
+przykladowe_dane$predicted_class <- ifelse(predictions$.pred_class == "True", TRUE, FALSE)
+print(przykladowe_dane)
+
+```
